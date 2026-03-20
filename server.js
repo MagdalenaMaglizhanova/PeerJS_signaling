@@ -1,91 +1,125 @@
-const express = require('express');
-const { ExpressPeerServer } = require('peer');
-const cors = require('cors');
+// Добавете функция за регистриране на потребителя
+const registerUserWithPeer = async (peerId: string) => {
+  if (!user) return;
+  
+  try {
+    const response = await fetch('http://localhost:3001/register', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        uid: user.uid,
+        peerId: peerId
+      })
+    });
+    
+    const data = await response.json();
+    console.log('✅ Регистриран в сървъра:', data);
+  } catch (error) {
+    console.error('Грешка при регистрация:', error);
+  }
+};
 
-const app = express();
+// Намерете потребител по UID
+const findUserByUid = async (uid: string) => {
+  try {
+    const response = await fetch(`http://localhost:3001/find-user/${uid}`);
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    console.error('Грешка при търсене:', error);
+    return null;
+  }
+};
 
-// CORS настройки - позволи на всички origins
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+// Променете Peer инициализацията:
+peer.on('open', async (id) => {
+  console.log('✅ Peer ID:', id);
+  if (isMounted) {
+    setPeerId(id);
+    
+    // Регистрираме потребителя в нашия сървър
+    await registerUserWithPeer(id);
+    
+    // Обновяваме статуса във Firebase
+    await updateOnlineStatus(true, id);
+    setIsInitializing(false);
+  }
+});
 
-// За опции заявките
-app.options('*', cors());
+// Променете startCall функцията да използва UID
+const startCall = async (targetUser: OnlineUser) => {
+  // Вместо директно да използваме peerId от Firebase,
+  // можем да проверим в нашия сървър дали потребителят е онлайн
+  const userInfo = await findUserByUid(targetUser.uid);
+  
+  if (!userInfo || !userInfo.exists) {
+    setError(`${targetUser.name} не е онлайн`);
+    return;
+  }
+  
+  const targetPeerId = userInfo.peerId;
+  
+  if (!targetPeerId) {
+    setError(`${targetUser.name} не е готов за видео разговор.`);
+    return;
+  }
+  
+  // ... останалата част от кода
+  if (!localStreamRef.current || !peerRef.current) {
+    setError('Грешка при инициализация');
+    return;
+  }
 
-app.use(express.json());
+  setSelectedUser(targetUser);
+  setConnectionStatus('connecting');
+  setIsWaitingForAnswer(true);
+  
+  try {
+    const call = peerRef.current.call(targetPeerId, localStreamRef.current);
+    
+    call.on('stream', (remoteStream: MediaStream) => {
+      console.log('✅ Получен отдалечен stream');
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStream;
+        remoteVideoRef.current.play().catch(e => console.log('Play error:', e));
+        setHasRemoteStream(true);
+      }
+      setIsCallActive(true);
+      setConnectionStatus('connected');
+      setIsWaitingForAnswer(false);
+    });
+    
+    call.on('close', () => {
+      console.log('📞 Повикването е затворено');
+      endCall();
+    });
+    
+    call.on('error', (err: Error) => {
+      console.error('Грешка в call:', err);
+      setError('Не може да се свърже с потребителя');
+      endCall();
+    });
+    
+    currentCallRef.current = call;
+  } catch (err) {
+    console.error('Грешка при позвъняване:', err);
+    setError('Грешка при позвъняване');
+    setConnectionStatus('disconnected');
+    setIsWaitingForAnswer(false);
+  }
+};
 
-// Health check endpoint
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    message: 'PeerJS Signaling Server is running',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      peerjs: '/peerjs',
-      stats: '/stats'
+// При затваряне, дерегистрирайте потребителя
+useEffect(() => {
+  return () => {
+    if (peerId && user) {
+      fetch('http://localhost:3001/unregister', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uid: user.uid, peerId })
+      }).catch(console.error);
     }
-  });
-});
-
-// Статистика
-app.get('/stats', (req, res) => {
-  res.json({
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    connections: peerServer?.connections?.size || 0,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Порт от Render или 3001 като fallback
-const PORT = process.env.PORT || 3001;
-
-// Създаване на HTTP сървър
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 PeerJS signaling server is running on port ${PORT}`);
-  console.log(`📡 WebSocket endpoint: /peerjs`);
-  console.log(`🌐 CORS enabled for all origins`);
-});
-
-// PeerJS сървър конфигурация - ОПРОСТЕНА ВЕРСИЯ
-const peerServer = ExpressPeerServer(server, {
-  debug: true,
-  path: '/',
-  allow_discovery: true,
-  proxied: true
-});
-
-// Използване на PeerJS middleware
-app.use('/peerjs', peerServer);
-
-// Запазване на активните връзки
-peerServer.connections = new Map();
-
-// Събития на PeerJS сървъра
-peerServer.on('connection', (client) => {
-  console.log(`🔌 Нов клиент свързан: ${client.getId()}`);
-  if (peerServer.connections) {
-    console.log(`📊 Общо клиенти: ${peerServer.connections.size}`);
-  }
-});
-
-peerServer.on('disconnect', (client) => {
-  console.log(`🔌 Клиент прекъсна връзка: ${client.getId()}`);
-  if (peerServer.connections) {
-    console.log(`📊 Оставащи клиенти: ${peerServer.connections.size}`);
-  }
-});
-
-peerServer.on('error', (error) => {
-  console.error('❌ PeerJS грешка:', error);
-});
-
-// За дебъг - принтирай всички заявки
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-  next();
-});
-
-console.log('✅ Server configuration complete');
+  };
+}, [peerId, user]);
